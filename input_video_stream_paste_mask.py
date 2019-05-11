@@ -1,22 +1,27 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-# @Time    : 2019/3/16 10:10
-# @Author  : tomoncle
-# @Site    : https://github.com/tomoncle/face-detection-induction-course
-# @File    : input_video_stream_paste_mask.py
-# @Software: PyCharm
 
+import os
+import time
 from time import sleep
-
+import sys
 import cv2
 import numpy as np
 from PIL import Image
 from imutils import face_utils, resize
+from threading import Thread
+from multiprocessing import Pool
 
 try:
     from dlib import get_frontal_face_detector, shape_predictor
 except ImportError:
     raise
+
+def async(f):
+    def wrapper(*args, **kwargs):
+        thr = Thread(target = f, args = args, kwargs = kwargs)
+        thr.start()
+    return wrapper
 
 
 class DynamicStreamMaskService(object):
@@ -24,19 +29,16 @@ class DynamicStreamMaskService(object):
     动态黏贴面具服务
     """
 
-    def __init__(self, saved=False):
+    def __init__(self, video, saved=False):
         self.saved = saved  # 是否保存图片
+        self.dangering = False # 是否正在危险警告
         self.listener = True  # 启动参数
-        self.video_capture = cv2.VideoCapture(0)  # 调用本地摄像头
+        self.video_capture = cv2.VideoCapture(video)
         self.doing = False  # 是否进行面部面具
-        self.speed = 0.1  # 面具移动速度
         self.detector = get_frontal_face_detector()  # 面部识别器
         self.predictor = shape_predictor("shape_predictor_68_face_landmarks.dat")  # 面部分析器
-        self.fps = 4  # 面具存在时间基础时间
-        self.animation_time = 0  # 动画周期初始值
-        self.duration = self.fps * 4  # 动画周期最大值
-        self.fixed_time = 4  # 画图之后，停留时间
         self.max_width = 500  # 图像大小
+        self.max_height = 500
         self.deal, self.text, self.cigarette = None, None, None  # 面具对象
 
     def read_data(self):
@@ -46,6 +48,12 @@ class DynamicStreamMaskService(object):
         """
         _, data = self.video_capture.read()
         return data
+    
+    @async
+    def danger_beep(self):
+        self.dangering = True
+        os.system('say "危险！危险！"')
+        self.dangering = False
 
     def save_data(self, draw_img):
         """
@@ -55,7 +63,9 @@ class DynamicStreamMaskService(object):
         """
         if not self.saved:
             return
-        draw_img.save("images/%05d.png" % self.animation_time)
+        self.console("保存证据...")
+        draw_img.save("images/%s.png" % time.strftime("%Y%m%d%H%M%S", time.localtime(time.time())))
+        self.saved = False
 
     def init_mask(self):
         """
@@ -127,7 +137,7 @@ class DynamicStreamMaskService(object):
             face['glasses'] = self.get_glasses_info(face_shape, face_shades_width)
 
             faces.append(face)
-
+        
         return faces
 
     def start(self):
@@ -135,25 +145,23 @@ class DynamicStreamMaskService(object):
         启动程序
         :return:
         """
+        #p = Pool()
         self.console("程序启动成功.")
         self.init_mask()
         while self.listener:
             frame = self.read_data()
-            frame = resize(frame, width=self.max_width)
+            frame = resize(frame, width=self.max_width, height=self.max_height)
             img_gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
             rects = self.detector(img_gray, 0)
             faces = self.orientation(rects, img_gray)
             draw_img = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
-            if self.doing:
-                self.drawing(draw_img, faces)
-                self.animation_time += self.speed
-                self.save_data(draw_img)
-                if self.animation_time > self.duration:
-                    self.doing = False
-                    self.animation_time = 0
-                else:
-                    frame = cv2.cvtColor(np.asarray(draw_img), cv2.COLOR_RGB2BGR)
+            self.drawing(draw_img, faces)
+            self.save_data(draw_img)
+            frame = cv2.cvtColor(np.asarray(draw_img), cv2.COLOR_RGB2BGR)
             cv2.imshow("hello mask", frame)
+            #p.map(self.danger_beep,faces)
+            if not self.dangering and len(faces)>0:
+                self.danger_beep()
             self.listener_keys()
 
     def listener_keys(self):
@@ -168,8 +176,8 @@ class DynamicStreamMaskService(object):
             sleep(1)
             self.exit()
 
-        if key == ord("d"):
-            self.doing = not self.doing
+        if key == ord("s"):    #按S键保存画面
+            self.saved = not self.saved
 
     def exit(self):
         """
@@ -187,25 +195,23 @@ class DynamicStreamMaskService(object):
         :return:
         """
         for face in faces:
-            if self.animation_time < self.duration - self.fixed_time:
-                current_x = int(face["glasses"]["pos"][0])
-                current_y = int(face["glasses"]["pos"][1] * self.animation_time / (self.duration - self.fixed_time))
-                draw_img.paste(face["glasses"]["image"], (current_x, current_y), face["glasses"]["image"])
+            draw_img.paste(face["glasses"]["image"], face["glasses"]["pos"], face["glasses"]["image"])
+            draw_img.paste(face["cigarette"]["image"], face["cigarette"]["pos"], face["cigarette"]["image"])
+            draw_img.paste(self.text, (20, draw_img.height // 2 ), self.text)
 
-                cigarette_x = int(face["cigarette"]["pos"][0])
-                cigarette_y = int(face["cigarette"]["pos"][1] * self.animation_time / (self.duration - self.fixed_time))
-                draw_img.paste(face["cigarette"]["image"], (cigarette_x, cigarette_y),
-                               face["cigarette"]["image"])
-            else:
-                draw_img.paste(face["glasses"]["image"], face["glasses"]["pos"], face["glasses"]["image"])
-                draw_img.paste(face["cigarette"]["image"], face["cigarette"]["pos"], face["cigarette"]["image"])
-                draw_img.paste(self.text, (75, draw_img.height // 2 + 128), self.text)
 
     @classmethod
     def console(cls, s):
         print("{} !".format(s))
 
+def main(argv):
+    if len(argv)<2:
+        video = 0
+    else:
+        video = argv[1]
+    print(video)
+    ms = DynamicStreamMaskService(video)
+    ms.start()
 
 if __name__ == '__main__':
-    ms = DynamicStreamMaskService()
-    ms.start()
+    main(sys.argv)
